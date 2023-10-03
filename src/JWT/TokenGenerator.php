@@ -1,66 +1,76 @@
 <?php
 declare(strict_types=1);
 
-namespace Nexmo\JWT;
+namespace Vonage\JWT;
 
-use Lcobucci\JWT\Builder;
-use Lcobucci\JWT\Signer\Rsa\Sha256;
-use Nexmo\JWT\Exception\InvalidJTIException;
 use Ramsey\Uuid\Uuid;
 use RuntimeException;
+use Lcobucci\JWT\Configuration;
+use Lcobucci\JWT\Parser;
+use Lcobucci\JWT\Signer\Rsa\Sha256;
+use Lcobucci\JWT\Signer\Key\InMemory;
+use stdClass;
+use Vonage\JWT\Exception\InvalidJTIException;
 
 class TokenGenerator
 {
     /**
      * UUID of the application we are generating a UUID for
-     * @var string
      */
-    protected $applicationId;
+    protected string $applicationId;
+
+    /**
+     * Set of generic claims to add to a JWT
+     * @var array<mixed>
+     */
+    protected array $claims = [];
+
+    /**
+     * Configuration of the token we are using
+     */
+    protected Configuration $config;
 
     /**
      * Number of seconds to expire in, defaults to 15 minutes
-     * @var int
      */
-    protected $ttl = 900;
+    protected int $ttl = 900;
 
     /**
      * UUIDv4 ID for the JWT
-     * @var string
      */
-    protected $jti;
+    protected string $jti;
 
     /**
      * Unix Timestamp at which this token becomes valid
-     * @var int
      */
-    protected $nbf;
+    protected \DateTimeImmutable $nbf;
 
     /**
      * ACL Path information
-     * @var array<string, \stdClass>
+     * @var array<string, stdClass>
      */
-    protected $paths = [];
+    protected array $paths = [];
 
     /**
      * Private key text used for signing
-     * @var string
      */
-    protected $privateKey;
+    protected InMemory $privateKey;
 
     /**
      * Subject to use in the JWT
-     * @var string
      */
-    protected $subject;
+    protected string $subject;
 
     public function __construct(string $applicationId, string $privateKey)
     {
         $this->applicationId = $applicationId;
-        $this->privateKey = $privateKey;
+        $this->privateKey = InMemory::plainText($privateKey);
+
+        $this->config = Configuration::forSymmetricSigner(new Sha256(), $this->privateKey);
     }
 
     /**
-     * @param array<string, array> $options
+     * @param array<string, array<string, string>> $options
      */
     public function addPath(string $path, array $options = []) : self
     {
@@ -68,28 +78,51 @@ class TokenGenerator
         return $this;
     }
 
+    /**
+     * Factory to create a token in one call
+     * $options format:
+     *  - ttl: string
+     *  - jti: string
+     *  - paths: array<string, \stdClass>
+     *  - not_before: int|\DateTimeImmutable
+     *  - sub: string
+     *
+     * @param array<string, mixed> $options
+     */
     public static function factory(string $applicationId, string $privateKey, array $options = []) : string
     {
         $generator = new self($applicationId, $privateKey);
 
         if (array_key_exists('ttl', $options)) {
             $generator->setTTL($options['ttl']);
+            unset($options['ttl']);
         }
 
         if (array_key_exists('jti', $options)) {
             $generator->setJTI($options['jti']);
+            unset($options['jti']);
         }
 
         if (array_key_exists('paths', $options)) {
             $generator->setPaths($options['paths']);
+            unset($options['paths']);
         }
 
         if (array_key_exists('not_before', $options)) {
+            if (is_int($options['not_before'])) {
+                $options['not_before'] = (new \DateTimeImmutable())->setTimestamp($options['not_before']);
+            }
             $generator->setNotBefore($options['not_before']);
+            unset($options['not_before']);
         }
 
-        if (array_key_exists('subject', $options)) {
-            $generator->setSubject($options['subject']);
+        if (array_key_exists('sub', $options)) {
+            $generator->setSubject($options['sub']);
+            unset($options['sub']);
+        }
+
+        foreach ($options as $key => $value) {
+            $generator->addClaim($key, $value);
         }
 
         return $generator->generate();
@@ -100,14 +133,14 @@ class TokenGenerator
         $iat = time();
         $exp = $iat + $this->ttl;
 
-        $builder = new Builder();
-        $builder->setIssuedAt($iat)
-            ->setExpiration($exp)
+        $builder = $this->config->builder();
+        $builder->issuedAt((new \DateTimeImmutable())->setTimestamp($iat))
+            ->expiresAt((new \DateTimeImmutable())->setTimestamp($exp))
             ->identifiedBy($this->getJTI())
-            ->set('application_id', $this->applicationId);
+            ->withClaim('application_id', $this->applicationId);
 
         if (!empty($this->getPaths())) {
-            $builder->set('acl', ['paths' => $this->getPaths()]);
+            $builder->withClaim('acl', ['paths' => $this->getPaths()]);
         }
 
         try {
@@ -117,12 +150,16 @@ class TokenGenerator
         }
 
         try {
-            $builder->set('subject', $this->getSubject());
+            $builder->relatedTo($this->getSubject());
         } catch (RuntimeException $e) {
             // This is fine, Subject isn't required
         }
 
-        return (string) $builder->sign(new Sha256(), $this->privateKey)->getToken();
+        foreach ($this->claims as $key => $value) {
+            $builder->withClaim($key, $value);
+        }
+
+        return $builder->getToken($this->config->signer(), $this->config->signingKey())->toString();
     }
 
     public function getJTI() : string
@@ -134,7 +171,7 @@ class TokenGenerator
         return $this->jti;
     }
 
-    public function getNotBefore() : int
+    public function getNotBefore() : \DateTimeImmutable
     {
         if (!isset($this->nbf)) {
             throw new RuntimeException('Not Before time has not been set');
@@ -143,8 +180,13 @@ class TokenGenerator
         return $this->nbf;
     }
 
+    public function getParser(): Parser
+    {
+        return $this->config->parser();
+    }
+
     /**
-     * @return array<string, \stdClass>
+     * @return array<string, stdClass>
      */
     public function getPaths() : array
     {
@@ -158,6 +200,12 @@ class TokenGenerator
         }
 
         return $this->subject;
+    }
+
+    public function addClaim(string $claim, mixed $value): self
+    {
+        $this->claims[$claim] = $value;
+        return $this;
     }
 
     public function setTTL(int $seconds) : self
@@ -176,7 +224,7 @@ class TokenGenerator
         return $this;
     }
 
-    public function setNotBefore(int $timestamp) : self
+    public function setNotBefore(\DateTimeImmutable $timestamp) : self
     {
         $this->nbf = $timestamp;
         return $this;
@@ -187,7 +235,7 @@ class TokenGenerator
      * WARNING: This will reset the paths to the new list, overriding any
      * existing paths.
      *
-     * @param array<string|int, array|string> $pathData
+     * @param array<string|int, array<string, mixed>|string> $pathData
      */
     public function setPaths(array $pathData) : self
     {
