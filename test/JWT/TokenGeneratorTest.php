@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 
-namespace Nexmo\JWT;
+namespace Vonage\JWT;
 
 /**
  * Mock time call to help with testing
@@ -11,13 +11,14 @@ function time()
     return 1590087267;
 }
 
-namespace NexmoTest\JWT;
+namespace VonageTest\JWT;
 
+use Generator;
 use Ramsey\Uuid\Uuid;
 use Lcobucci\JWT\Parser;
-use Nexmo\JWT\TokenGenerator;
+use Vonage\JWT\TokenGenerator;
 use PHPUnit\Framework\TestCase;
-use Nexmo\JWT\Exception\InvalidJTIException;
+use Vonage\JWT\Exception\InvalidJTIException;
 use stdClass;
 
 class TokenGeneratorTest extends TestCase
@@ -33,15 +34,15 @@ class TokenGeneratorTest extends TestCase
         );
         $token = $generator->generate();
 
-        $parsedToken = (new Parser())->parse($token);
-        $this->assertSame('RS256', $parsedToken->getHeader('alg'));
-        $this->assertSame('JWT', $parsedToken->getHeader('typ'));
-        $this->assertSame(1590087267, $parsedToken->getClaim('iat'));
-        $this->assertSame(1590087267 + 900, $parsedToken->getClaim('exp'));
-        $this->assertTrue(Uuid::isValid($parsedToken->getClaim('jti')));
-        $this->assertFalse($parsedToken->hasHeader('acl'));
-        $this->assertFalse($parsedToken->hasHeader('nbf'));
-        $this->assertFalse($parsedToken->hasClaim('subject'));
+        $parsedToken = $generator->getParser()->parse($token);
+        $this->assertSame('RS256', $parsedToken->headers()->get('alg'));
+        $this->assertSame('JWT', $parsedToken->headers()->get('typ'));
+        $this->assertSame(1590087267, $parsedToken->claims()->get('iat')->getTimestamp());
+        $this->assertSame(1590087267 + 900, $parsedToken->claims()->get('exp')->getTimestamp());
+        $this->assertTrue(Uuid::isValid($parsedToken->claims()->get('jti')));
+        $this->assertFalse($parsedToken->headers()->has('acl'));
+        $this->assertFalse($parsedToken->headers()->has('nbf'));
+        $this->assertFalse($parsedToken->claims()->has('sub'));
     }
 
     /**
@@ -56,8 +57,8 @@ class TokenGeneratorTest extends TestCase
         $generator->setTTL(50);
         $token = $generator->generate();
 
-        $parsedToken = (new Parser())->parse($token);
-        $this->assertSame(1590087267 + 50, $parsedToken->getClaim('exp'));
+        $parsedToken = $generator->getParser()->parse($token);
+        $this->assertSame(1590087267 + 50, $parsedToken->claims()->get('exp')->getTimestamp());
     }
 
     /**
@@ -74,9 +75,9 @@ class TokenGeneratorTest extends TestCase
         $generator->setJTI($uuid);
         $token = $generator->generate();
 
-        $parsedToken = (new Parser())->parse($token);
-        $this->assertTrue(Uuid::isValid($parsedToken->getClaim('jti')));
-        $this->assertSame($uuid, $parsedToken->getClaim('jti'));
+        $parsedToken = $generator->getParser()->parse($token);
+        $this->assertTrue(Uuid::isValid($parsedToken->claims()->get('jti')));
+        $this->assertSame($uuid, $parsedToken->claims()->get('jti'));
     }
 
     /**
@@ -98,7 +99,7 @@ class TokenGeneratorTest extends TestCase
      */
     public function testCanSetNBF()
     {
-        $nbf = strtotime('2025-01-01 00:00:00');
+        $nbf = new \DateTimeImmutable('2025-01-01 00:00:00');
 
         $generator = new TokenGenerator(
             'd70425f2-1599-4e4c-81c4-cffc66e49a12',
@@ -107,8 +108,8 @@ class TokenGeneratorTest extends TestCase
         $generator->setNotBefore($nbf);
         $token = $generator->generate();
 
-        $parsedToken = (new Parser())->parse($token);
-        $this->assertSame($nbf, $parsedToken->getClaim('nbf'));
+        $parsedToken = $generator->getParser()->parse($token);
+        $this->assertEquals($nbf, $parsedToken->claims()->get('nbf'));
     }
 
     /**
@@ -128,13 +129,16 @@ class TokenGeneratorTest extends TestCase
         $generator->setPaths($paths);
         $token = $generator->generate();
 
-        $parsedToken = (new Parser())->parse($token);
-        $this->assertTrue($parsedToken->hasClaim('acl'));
-        $acl = $parsedToken->getClaim('acl');
+        $parsedToken = $generator->getParser()->parse($token);
+        $this->assertTrue($parsedToken->claims()->has('acl'));
+        $acl = $parsedToken->claims()->get('acl');
+        if ($acl instanceof \stdClass) {
+            $acl = json_decode(json_encode($acl), true);
+        }
 
-        $this->assertCount(2, (array) $acl->paths);
-        $this->assertTrue($acl->paths->{$paths[0]} instanceof stdClass);
-        $this->assertTrue($acl->paths->{$paths[1]} instanceof stdClass);
+        $this->assertCount(2, $acl['paths']);
+        $this->assertArrayHasKey($paths[0], $acl['paths']);
+        $this->assertArrayHasKey($paths[1], $acl['paths']);
     }
 
     /**
@@ -156,16 +160,17 @@ class TokenGeneratorTest extends TestCase
         $generator->setPaths($paths);
         $token = $generator->generate();
 
-        $parsedToken = (new Parser())->parse($token);
-        $this->assertTrue($parsedToken->hasClaim('acl'));
-        $acl = $parsedToken->getClaim('acl');
+        $parsedToken = $generator->getParser()->parse($token);
+        $this->assertTrue($parsedToken->claims()->has('acl'));
+        $acl = $parsedToken->claims()->get('acl');
+        if ($acl instanceof \stdClass) {
+            $acl = json_decode(json_encode($acl), true);
+        }
 
-        $this->assertCount(2, (array) $acl->paths);
-        $this->assertTrue($acl->paths->{$paths[0]} instanceof stdClass);
+        $this->assertCount(2, (array) $acl['paths']);
 
         $convoPath = '/*/conversations/**';
-        $this->assertTrue($acl->paths->{$convoPath} instanceof stdClass);
-        $this->assertTrue(is_array($acl->paths->{$convoPath}->methods));
+        $this->assertTrue(is_array($acl['paths'][$convoPath]['methods']));
     }
 
     /**
@@ -182,12 +187,14 @@ class TokenGeneratorTest extends TestCase
         $generator->addPath($path);
         $token = $generator->generate();
 
-        $parsedToken = (new Parser())->parse($token);
-        $this->assertTrue($parsedToken->hasClaim('acl'));
-        $acl = $parsedToken->getClaim('acl');
+        $parsedToken = $generator->getParser()->parse($token);
+        $this->assertTrue($parsedToken->claims()->has('acl'));
+        $acl = $parsedToken->claims()->get('acl');
+        if ($acl instanceof \stdClass) {
+            $acl = json_decode(json_encode($acl), true);
+        }
 
-        $this->assertCount(1, (array) $acl->paths);
-        $this->assertTrue($acl->paths->{$path} instanceof stdClass);
+        $this->assertCount(1, (array) $acl['paths']);
     }
 
     /**
@@ -207,30 +214,37 @@ class TokenGeneratorTest extends TestCase
         $generator->addPath($path, $options);
         $token = $generator->generate();
 
-        $parsedToken = (new Parser())->parse($token);
-        $this->assertTrue($parsedToken->hasClaim('acl'));
-        $acl = $parsedToken->getClaim('acl');
+        $parsedToken = $generator->getParser()->parse($token);
+        $this->assertTrue($parsedToken->claims()->has('acl'));
+        $acl = $parsedToken->claims()->get('acl');
+        if ($acl instanceof \stdClass) {
+            $acl = json_decode(json_encode($acl), true);
+        }
 
-        $this->assertCount(1, (array) $acl->paths);
-        $this->assertTrue($acl->paths->{$path} instanceof stdClass);
-        $this->assertSame($options['methods'], $acl->paths->{$path}->methods);
+        $this->assertCount(1, (array) $acl['paths']);
+        $this->assertSame($options['methods'], $acl['paths'][$path]['methods']);
     }
 
     public function testFactoryGeneratesValidToken()
     {
+        $generator = new TokenGenerator(
+            'd70425f2-1599-4e4c-81c4-cffc66e49a12',
+            file_get_contents(__DIR__ . '/resources/private.key')
+        );
+
         $token = TokenGenerator::factory(
             'd70425f2-1599-4e4c-81c4-cffc66e49a12',
             file_get_contents(__DIR__ . '/resources/private.key')
         );
 
-        $parsedToken = (new Parser())->parse($token);
-        $this->assertSame('RS256', $parsedToken->getHeader('alg'));
-        $this->assertSame('JWT', $parsedToken->getHeader('typ'));
-        $this->assertSame(1590087267, $parsedToken->getClaim('iat'));
-        $this->assertSame(1590087267 + 900, $parsedToken->getClaim('exp'));
-        $this->assertTrue(Uuid::isValid($parsedToken->getClaim('jti')));
-        $this->assertFalse($parsedToken->hasHeader('acl'));
-        $this->assertFalse($parsedToken->hasHeader('nbf'));
+        $parsedToken = $generator->getParser()->parse($token);
+        $this->assertSame('RS256', $parsedToken->headers()->get('alg'));
+        $this->assertSame('JWT', $parsedToken->headers()->get('typ'));
+        $this->assertSame(1590087267, $parsedToken->claims()->get('iat')->getTimestamp());
+        $this->assertSame(1590087267 + 900, $parsedToken->claims()->get('exp')->getTimestamp());
+        $this->assertTrue(Uuid::isValid($parsedToken->claims()->get('jti')));
+        $this->assertFalse($parsedToken->headers()->has('acl'));
+        $this->assertFalse($parsedToken->headers()->has('nbf'));
     }
 
     public function testFactoryUsesPassedOptions()
@@ -252,28 +266,33 @@ class TokenGeneratorTest extends TestCase
                 'jti' => $uuid,
                 'paths' => $paths,
                 'not_before' => $nbf,
-                'subject' => 'foo'
+                'sub' => 'foo'
             ]
         );
+        $generator = new TokenGenerator(
+            'd70425f2-1599-4e4c-81c4-cffc66e49a12',
+            file_get_contents(__DIR__ . '/resources/private.key')
+        );
 
-        $parsedToken = (new Parser())->parse($token);
-        $this->assertSame('RS256', $parsedToken->getHeader('alg'));
-        $this->assertSame('JWT', $parsedToken->getHeader('typ'));
+        $parsedToken = $generator->getParser()->parse($token);
+        $this->assertSame('RS256', $parsedToken->headers()->get('alg'));
+        $this->assertSame('JWT', $parsedToken->headers()->get('typ'));
 
-        $this->assertSame(1590087267, $parsedToken->getClaim('iat'));
-        $this->assertSame(1590087267 + 50, $parsedToken->getClaim('exp'));
+        $this->assertSame(1590087267, $parsedToken->claims()->get('iat')->getTimestamp());
+        $this->assertSame(1590087267 + 50, $parsedToken->claims()->get('exp')->getTimestamp());
 
-        $this->assertTrue(Uuid::isValid($parsedToken->getClaim('jti')));
-        $this->assertSame($uuid, $parsedToken->getClaim('jti'));
+        $this->assertTrue(Uuid::isValid($parsedToken->claims()->get('jti')));
+        $this->assertSame($uuid, $parsedToken->claims()->get('jti'));
 
-        $acl = $parsedToken->getClaim('acl');
-        $this->assertCount(2, (array) $acl->paths);
-        $this->assertTrue($acl->paths->{$paths[0]} instanceof stdClass);
+        $acl = $parsedToken->claims()->get('acl');
+        if ($acl instanceof \stdClass) {
+            $acl = json_decode(json_encode($acl), true);
+        }
+        $this->assertCount(2, $acl['paths']);
         $convoPath = '/*/conversations/**';
-        $this->assertTrue($acl->paths->{$convoPath} instanceof stdClass);
-        $this->assertTrue(is_array($acl->paths->{$convoPath}->methods));
+        $this->assertTrue(is_array($acl['paths'][$convoPath]['methods']));
 
-        $this->assertSame($nbf, $parsedToken->getClaim('nbf'));
+        $this->assertSame($nbf, $parsedToken->claims()->get('nbf')->getTimestamp());
     }
 
     public function testCanSetTheSubject()
@@ -285,8 +304,57 @@ class TokenGeneratorTest extends TestCase
         $generator->setSubject('foo');
         $token = $generator->generate();
 
-        $parsedToken = (new Parser())->parse($token);
-        $this->assertTrue($parsedToken->hasClaim('subject'));
-        $this->assertSame('foo', $parsedToken->getClaim('subject'));
+        $parsedToken = $generator->getParser()->parse($token);
+
+        $this->assertTrue($parsedToken->claims()->has('sub'));
+        $this->assertSame('foo', $parsedToken->claims()->get('sub'));
+    }
+
+    public function testCanAddGenericClaims()
+    {
+        $generator = new TokenGenerator(
+            'd70425f2-1599-4e4c-81c4-cffc66e49a12',
+            file_get_contents(__DIR__ . '/resources/private.key')
+        );
+        $generator->addClaim('foo', 'bar');
+        $token = $generator->generate();
+
+        $parsedToken = $generator->getParser()->parse($token);
+        $this->assertTrue($parsedToken->claims()->has('foo'));
+        $this->assertSame('bar', $parsedToken->claims()->get('foo'));
+    }
+
+    public function testCanAddGenericClaimsThroughFactory()
+    {
+        $generator = new TokenGenerator(
+            'd70425f2-1599-4e4c-81c4-cffc66e49a12',
+            file_get_contents(__DIR__ . '/resources/private.key')
+        );
+
+        $token = TokenGenerator::factory(
+            'd70425f2-1599-4e4c-81c4-cffc66e49a12',
+            file_get_contents(__DIR__ . '/resources/private.key'),
+            [
+                'foo' => 'bar'
+            ]
+        );
+
+        $parsedToken = $generator->getParser()->parse($token);
+        $this->assertTrue($parsedToken->claims()->has('foo'));
+        $this->assertSame('bar', $parsedToken->claims()->get('foo'));
+    }
+
+    public function testCanValidateJWTWithSignatureSecret()
+    {
+        $token = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpYXQiOjE1ODc0OTQ5NjIsImp0aSI6ImM1YmE4ZjI0LTFhMTQtNGMxMC1iZmRmLTNmYmU4Y2U1MTFiNSIsImlzcyI6IlZvbmFnZSIsInBheWxvYWRfaGFzaCI6ImQ2YzBlNzRiNTg1N2RmMjBlM2I3ZTUxYjMwYzBjMmE0MGVjNzNhNzc4NzliNmYwNzRkZGM3YTIzMTdkZDAzMWIiLCJhcGlfa2V5IjoiYTFiMmMzZCIsImFwcGxpY2F0aW9uX2lkIjoiYWFhYWFhYWEtYmJiYi1jY2NjLWRkZGQtMDEyMzQ1Njc4OWFiIn0.JQRKi1d0SQitmjPINfTWMpt3XZkGsLbD7EjCdXoNSbk';
+        $secret = 'ZYtdTtGV3BCFN7tWmOWr1md66XsquMggr4W2cTtXtcPgfnI0Xw';
+        $this->assertTrue(TokenGenerator::verifySignature($token, $secret));
+    }
+
+    public function testWillNotValidateJWTWithBadSecret()
+    {
+        $token = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpYXQiOjE1ODc0OTQ5NjIsImp0aSI6ImM1YmE4ZjI0LTFhMTQtNGMxMC1iZmRmLTNmYmU4Y2U1MTFiNSIsImlzcyI6IlZvbmFnZSIsInBheWxvYWRfaGFzaCI6ImQ2YzBlNzRiNTg1N2RmMjBlM2I3ZTUxYjMwYzBjMmE0MGVjNzNhNzc4NzliNmYwNzRkZGM3YTIzMTdkZDAzMWIiLCJhcGlfa2V5IjoiYTFiMmMzZCIsImFwcGxpY2F0aW9uX2lkIjoiYWFhYWFhYWEtYmJiYi1jY2NjLWRkZGQtMDEyMzQ1Njc4OWFiIn0.JQRKi1d0SQitmjPINfTWMpt3XZkGsLbD7EjCdXoNSbk';
+        $secret = 'ZYtdTtGV3BCFN7tWmOWr1md66XsquMggr4W2cTtXtcPgf55555';
+        $this->assertFalse(TokenGenerator::verifySignature($token, $secret));
     }
 }
